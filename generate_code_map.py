@@ -49,7 +49,7 @@ def validate_base_dir() -> bool:
 
 def extract_constants_from_header(filepath: Path) -> List[Tuple[str, str]]:
     """
-    Extract constant definitions from a header/ID file using AST parsing.
+    Extract constant definitions from a header/ID file using regex to preserve original format.
     
     Args:
         filepath: Path to the header file
@@ -61,28 +61,29 @@ def extract_constants_from_header(filepath: Path) -> List[Tuple[str, str]]:
     
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
-            tree = ast.parse(f.read())
-    except (SyntaxError, UnicodeDecodeError) as e:
-        logger.warning(f"Failed to parse {filepath.name}: {e}")
+            content = f.read()
+    except (UnicodeDecodeError, IOError) as e:
+        logger.warning(f"Failed to read {filepath.name}: {e}")
         return constants
     
-    # Extract module-level assignments
-    for node in ast.iter_child_nodes(tree):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    try:
-                        if hasattr(ast, 'unparse'):
-                            value_str = ast.unparse(node.value)
-                        else:
-                            value_str = str(node.value)
-                        
-                        # Truncate very long values for readability
-                        value_str = str(value_str)[:100]
-                        constants.append((target.id, value_str))
-                    except (ValueError, AttributeError) as e:
-                        logger.debug(f"Could not unparse value in {filepath.name}: {e}")
-                        continue
+    # Pattern to match variable assignments: name = value
+    # Captures the original format including hex notation (0x...)
+    pattern = r'^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*(.+?)\s*$'
+    
+    for line in content.split('\n'):
+        line = line.strip()
+        # Skip comments and empty lines
+        if not line or line.startswith('#'):
+            continue
+        
+        match = re.match(pattern, line)
+        if match:
+            name = match.group(1)
+            value = match.group(2).strip()
+            # Remove trailing comments if any
+            if '#' in value:
+                value = value.split('#')[0].strip()
+            constants.append((name, value))
     
     return constants
 
@@ -370,11 +371,9 @@ def generate_code_map(output_file: Optional[Path] = None) -> Optional[Path]:
         if constants:
             output.append("| Константа | Значение |")
             output.append("|-----------|----------|")
-            for name, value in constants[:50]:
+            for name, value in constants:
                 value = value.replace('|', '\\|')
                 output.append(f"| {name} | {value} |")
-            if len(constants) > 50:
-                output.append(f"| ... | (ещё {len(constants) - 50} констант) |")
             output.append("")
         else:
             output.append("*Нет констант*\n")
