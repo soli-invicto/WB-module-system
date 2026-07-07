@@ -3,13 +3,14 @@
 """
 Warband Code Map Generator
 
-Analyzes header_*.py and module_*.py files to extract constants, data structures, and usage patterns.
+Analyzes header_*.py, ID_*.py, module_*.py, and process_*.py files 
+to extract constants, data structures, and usage patterns.
 
 Usage:
     python generate_code_map.py [--dir /path/to/module/system]
     
 Environment:
-    WARBAND_DIR: Override the module system directory (default: current directory)
+    WARBAND_DIR: Override the module system directory (default: ./Vanilla Module System v1.171)
 """
 
 import os
@@ -28,8 +29,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Get base directory from environment or CLI argument, default to current directory
-BASE_DIR = Path(os.getenv("WARBAND_DIR", "."))
+# Get base directory from environment or CLI argument
+DEFAULT_DIR = Path("./Vanilla Module System v1.171")
+BASE_DIR = Path(os.getenv("WARBAND_DIR", str(DEFAULT_DIR)))
 if len(sys.argv) > 1 and sys.argv[1] == "--dir" and len(sys.argv) > 2:
     BASE_DIR = Path(sys.argv[2])
 
@@ -47,10 +49,7 @@ def validate_base_dir() -> bool:
 
 def extract_constants_from_header(filepath: Path) -> List[Tuple[str, str]]:
     """
-    Extract constant definitions from a header file using AST parsing.
-    
-    This is more reliable than regex as it handles multi-line assignments
-    and correctly ignores comments on the same line as code.
+    Extract constant definitions from a header/ID file using AST parsing.
     
     Args:
         filepath: Path to the header file
@@ -73,13 +72,10 @@ def extract_constants_from_header(filepath: Path) -> List[Tuple[str, str]]:
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     try:
-                        # Use ast.unparse if available (Python 3.9+), otherwise fallback
                         if hasattr(ast, 'unparse'):
                             value_str = ast.unparse(node.value)
                         else:
-                            value_str = ast.literal_eval(node.value) if isinstance(
-                                node.value, (ast.Constant, ast.List, ast.Dict)
-                            ) else str(node.value)
+                            value_str = str(node.value)
                         
                         # Truncate very long values for readability
                         value_str = str(value_str)[:100]
@@ -103,7 +99,7 @@ def extract_main_array_structure(
         array_name: Name of the array to analyze (auto-detected if None)
         
     Returns:
-        Dictionary with array_name, element_count, and structure, or None if not found
+        Dictionary with array_name, element_count, and structure
     """
     try:
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
@@ -119,13 +115,13 @@ def extract_main_array_structure(
             return None
         array_name = match.group(1)
     
-    # Find the array definition with boundary check for regex
+    # Find the array definition
     pattern = r'^' + re.escape(array_name) + r'\s*=\s*\['
     match = re.search(pattern, content, re.MULTILINE)
     if not match:
         return None
     
-    # Try AST-based parsing first (most reliable)
+    # Try AST-based parsing first
     try:
         tree = ast.parse(content)
         for node in ast.walk(tree):
@@ -137,9 +133,9 @@ def extract_main_array_structure(
                                 first_element = node.value.elts[0]
                                 return analyze_tuple_structure(first_element, array_name)
     except (SyntaxError, ValueError):
-        pass  # Fall back to regex approach
+        pass
     
-    # Fallback: regex-based extraction for the first element
+    # Fallback: regex-based extraction
     try:
         array_match = re.search(
             r'^' + re.escape(array_name) + r'\s*=\s*\[(.+?)\],',
@@ -191,7 +187,7 @@ def count_top_level_elements(elem_str: str, array_name: str) -> Dict:
     return {
         'array_name': array_name,
         'element_count': len(elements),
-        'structure': elements[:5]  # First five elements as sample
+        'structure': elements[:5]
     }
 
 
@@ -204,7 +200,7 @@ def analyze_tuple_structure(node: ast.expr, array_name: str) -> Dict:
         array_name: Name of the parent array
         
     Returns:
-        Dictionary describing the structure, or None if not a tuple/list
+        Dictionary describing the structure
     """
     if not isinstance(node, (ast.Tuple, ast.List)):
         return None
@@ -212,7 +208,6 @@ def analyze_tuple_structure(node: ast.expr, array_name: str) -> Dict:
     elements = []
     for elt in node.elts:
         if isinstance(elt, ast.Constant):
-            # Handle constant values
             val = str(elt.value)[:50]
             elements.append(f"const:{val}")
         elif isinstance(elt, ast.Name):
@@ -263,7 +258,6 @@ def extract_global_variables(filepath: Path) -> Set[str]:
         return globals_used
     
     # Pattern for $variable (Warband global variables)
-    # Must start with letter or underscore, followed by alphanumerics or underscores
     dollar_vars = re.findall(r'\$([a-zA-Z_][a-zA-Z0-9_]*)', content)
     globals_used.update(dollar_vars)
     
@@ -273,11 +267,6 @@ def extract_global_variables(filepath: Path) -> Set[str]:
 def extract_register_usage(filepath: Path) -> Dict[str, int]:
     """
     Extract register usage patterns from a file.
-    
-    Tracks:
-    - :reg(N) patterns
-    - s0-s15 string registers
-    - pos_0, pos_1, etc. position registers
     
     Args:
         filepath: Path to the file to analyze
@@ -294,13 +283,12 @@ def extract_register_usage(filepath: Path) -> Dict[str, int]:
         logger.warning(f"Could not read {filepath.name}: {e}")
         return dict(registers)
     
-    # :reg(X) pattern - registers accessed via function
+    # :reg(X) pattern
     reg_matches = re.findall(r':reg\((\d+)\)', content)
     for m in reg_matches:
         registers[f'reg{m}'] += 1
     
-    # s0-s999 pattern (string registers) - but limit to realistic s0-s15 range
-    # Use word boundaries to avoid false positives
+    # s0-s15 string registers
     sreg_matches = re.findall(r'\b(s(?:1[0-5]|[0-9]))\b', content)
     for m in sreg_matches:
         registers[m] += 1
@@ -313,32 +301,40 @@ def extract_register_usage(filepath: Path) -> Dict[str, int]:
     return dict(registers)
 
 
-def get_module_files() -> Tuple[List[Path], List[Path]]:
+def get_module_files() -> Tuple[List[Path], List[Path], List[Path]]:
     """
-    Get lists of header and module files from BASE_DIR.
+    Get lists of files from BASE_DIR.
+    Looks for header_*.py, ID_*.py files (constants) and module_*.py files (data structures).
     
     Returns:
-        Tuple of (header_files, module_files) sorted by filename
+        Tuple of (constant_files, module_files, process_files) sorted by filename
     """
     if not validate_base_dir():
         logger.error("Cannot proceed without valid BASE_DIR")
-        return [], []
+        return [], [], []
     
-    header_files = []
+    constant_files = []
     module_files = []
+    process_files = []
     
     try:
         for filepath in BASE_DIR.iterdir():
             if filepath.is_file() and filepath.suffix == '.py':
-                if filepath.stem.startswith('header_'):
-                    header_files.append(filepath)
-                elif filepath.stem.startswith('module_'):
+                stem = filepath.stem
+                # Constants/ID files
+                if stem.startswith('header_') or stem.startswith('ID_'):
+                    constant_files.append(filepath)
+                # Data structure files
+                elif stem.startswith('module_'):
                     module_files.append(filepath)
+                # Process files
+                elif stem.startswith('process_'):
+                    process_files.append(filepath)
     except (IOError, OSError) as e:
         logger.error(f"Failed to list files in {BASE_DIR}: {e}")
-        return [], []
+        return [], [], []
     
-    return sorted(header_files), sorted(module_files)
+    return sorted(constant_files), sorted(module_files), sorted(process_files)
 
 
 def generate_code_map(output_file: Optional[Path] = None) -> Optional[Path]:
@@ -346,39 +342,39 @@ def generate_code_map(output_file: Optional[Path] = None) -> Optional[Path]:
     Generate the complete code map documentation.
     
     Args:
-        output_file: Path to write the output file. If None, defaults to
-                     BASE_DIR/warband-code-map.md
+        output_file: Path to write the output file
                      
     Returns:
         Path to the generated file, or None if generation failed
     """
-    header_files, module_files = get_module_files()
+    const_files, module_files, process_files = get_module_files()
     
-    if not header_files and not module_files:
-        logger.error("No header_*.py or module_*.py files found")
+    if not const_files and not module_files:
+        logger.error("No header_*.py, ID_*.py or module_*.py files found")
         return None
     
-    logger.info(f"Found {len(header_files)} header files and {len(module_files)} module files")
+    logger.info(f"Found {len(const_files)} constant files, {len(module_files)} module files, {len(process_files)} process files")
     
     output = []
     output.append("# 🗺️ WARBRAND CODE MAP\n")
-    output.append("Auto-generated analysis of Warband Module System\n")
+    output.append("Auto-generated analysis of Warband Module System v1.171\n")
     output.append("=" * 60 + "\n\n")
     
-    # Section 1: Constants from header files
-    output.append("## 1. КОНСТАНТЫ И ФЛАГИ\n")
+    # Section 1: Constants from header/ID files
+    output.append("## 1. КОНСТАНТЫ И ИДЕНТИФИКАТОРЫ\n")
     
-    for header_file in header_files:
-        output.append(f"### {header_file.name}\n")
-        constants = extract_constants_from_header(header_file)
+    for const_file in const_files:
+        output.append(f"### {const_file.name}\n")
+        constants = extract_constants_from_header(const_file)
         
         if constants:
             output.append("| Константа | Значение |")
             output.append("|-----------|----------|")
-            for name, value in constants:
-                # Escape pipe characters in values
+            for name, value in constants[:50]:
                 value = value.replace('|', '\\|')
                 output.append(f"| {name} | {value} |")
+            if len(constants) > 50:
+                output.append(f"| ... | (ещё {len(constants) - 50} констант) |")
             output.append("")
         else:
             output.append("*Нет констант*\n")
@@ -395,10 +391,11 @@ def generate_code_map(output_file: Optional[Path] = None) -> Optional[Path]:
             output.append(f"- **Количество элементов в кортеже:** {structure['element_count']}")
             output.append("- **Структура первого элемента:**")
             output.append("  ```")
-            for i, elem in enumerate(structure['structure']):
-                # Escape backticks in elements
+            for i, elem in enumerate(structure['structure'][:10]):
                 elem = elem.replace('`', '\\`')
                 output.append(f"  [{i}] {elem}")
+            if len(structure['structure']) > 10:
+                output.append(f"  ... ({len(structure['structure']) - 10} more elements)")
             output.append("  ```\n")
         else:
             output.append("*Не удалось определить структуру*\n")
@@ -410,7 +407,7 @@ def generate_code_map(output_file: Optional[Path] = None) -> Optional[Path]:
     key_files = [
         BASE_DIR / 'module_scripts.py',
         BASE_DIR / 'module_triggers.py',
-        BASE_DIR / 'module_variables.py'
+        BASE_DIR / 'module_simple_triggers.py',
     ]
     
     for filepath in key_files:
@@ -421,11 +418,12 @@ def generate_code_map(output_file: Optional[Path] = None) -> Optional[Path]:
     
     if all_globals:
         output.append("### Использованные глобальные переменные ($var):\n")
-        for var in sorted(all_globals):
+        sorted_globals = sorted(all_globals)
+        for i, var in enumerate(sorted_globals, 1):
             output.append(f"- `${var}`")
-        output.append("")
+        output.append(f"\n**Всего уникальных глобальных переменных:** {len(all_globals)}\n")
     else:
-        output.append("*Глобальные переменные не обнаружены в стандартном формате*\n")
+        output.append("*Глобальные переменные не обнаружены*\n")
     
     # Section 4: Register Usage
     output.append("\n## 4. РЕЕСТР ЛОКАЛЬНЫХ РЕГИСТРОВ И СТРОК\n")
@@ -434,9 +432,9 @@ def generate_code_map(output_file: Optional[Path] = None) -> Optional[Path]:
     key_files = [
         'module_scripts.py',
         'module_triggers.py',
+        'module_simple_triggers.py',
         'module_game_menus.py',
         'module_mission_templates.py',
-        'module_dialogs.py'
     ]
     
     for filename in key_files:
@@ -453,15 +451,23 @@ def generate_code_map(output_file: Optional[Path] = None) -> Optional[Path]:
         output.append("|---------|-------------------------|")
         
         sorted_regs = sorted(all_registers.items(), key=lambda x: x[1], reverse=True)
-        for reg, count in sorted_regs[:50]:  # Top 50
+        for reg, count in sorted_regs[:50]:
             output.append(f"| {reg} | {count} |")
         output.append("")
+        
+        if len(sorted_regs) > 50:
+            output.append(f"\n*Всего типов регистров: {len(sorted_regs)}*\n")
     else:
         output.append("*Регистры не обнаружены*\n")
     
+    # Add generation info
+    output.append("\n---\n")
+    output.append(f"**Сгенерировано:** {len(const_files)} файлов констант, {len(module_files)} файлов данных, {len(process_files)} файлов обработки\n")
+    output.append(f"**Базовая директория:** `{BASE_DIR}`\n")
+    
     # Write output file
     if output_file is None:
-        output_file = BASE_DIR / 'warband-code-map.md'
+        output_file = Path('.') / 'warband-code-map.md'
     
     try:
         with open(output_file, 'w', encoding='utf-8') as f:
@@ -477,3 +483,4 @@ if __name__ == '__main__':
     output_path = generate_code_map()
     if output_path is None:
         sys.exit(1)
+    print(f"✓ Code map saved to: {output_path}")
